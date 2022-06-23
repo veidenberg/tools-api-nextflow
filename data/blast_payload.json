@@ -1,0 +1,16 @@
+{
+ "email" : "test@ebi.ac.uk",
+ "stype" : "dna",
+ "program" : "blastn",
+ "sequence" : "agacagtgatgcagatgcagttgcgctgctgactacgtctgatgtagctg",
+ "alignments" : "50",
+ "dropoff" : "0",
+ "exp" : "10",
+ "filter" : "T",
+ "gapalign" : "1",
+ "gapext" : "2",
+ "gapopen" : "5",
+ "match_scores" : "1,-3",
+ "scores" : "50",
+ "database" : "ensemblgenomes/metazoa/apis_mellifera/Apis_mellifera.Amel_HAv3.1.dna.toplevel"
+}

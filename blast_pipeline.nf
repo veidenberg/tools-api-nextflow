@@ -85,6 +85,5 @@ process processResults {
 // Pipeline output: path to the final output file
 workflow{
   data_ch = Channel.fromPath("$baseDir/$params.datafile", checkIfExists: true)
-  output_ch = submitBlast(data_ch) | checkStatus | getResults | processResults
-  output_ch.view{ "Processed output file: $it" } //print the pipeline output value
+  submitBlast(data_ch) | checkStatus | getResults | processResults | view
 }

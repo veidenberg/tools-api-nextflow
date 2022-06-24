@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -9,6 +9,11 @@ import json
 import os
 
 app = FastAPI()
+
+# In-memory cache for started pipelines
+@app.on_event('startup')
+async def startup_event():
+  app.blast_runs = {}
 
 # Override response format for input payload validation error
 @app.exception_handler(RequestValidationError)
@@ -31,27 +36,49 @@ async def serve_config() -> dict:
 class JobIDs(BaseModel):
   job_ids: list[str]
 
-# Endpoint for submitting a BLAST job
-@app.post('/blast/job')
-async def submit_blast(payload: dict) -> dict:
-  run_id = secrets.token_urlsafe(16)
-  run_path = f"work/{run_id}"
+# Function for launching the BLAST pipeline
+# Input: submission ID, submission payload
+def run_blast(run_id: str, payload: dict) -> str:
+  # Prepare workdir
+  run_path = f"./work/{run_id}"
   payload_file = f"{run_path}/payload.json"
-  # Precreate the running dir and the input payload file
   os.makedirs(run_path, exist_ok=True)
   with open(payload_file, 'w') as fh:
     json.dump(payload, fh)
-  # Launch the NextFlow pipeline in the background
+  # Launch the pipeline and cahce the instance
   pipeline = nextflow.Pipeline("blast_pipeline.nf")
-  pipeline.run_and_poll(sleep=1, location=f"./{run_path}", params={"datafile": payload_file})
-  # Return the job dir ID. Other endpoints need to later access the pipeline by its ID.
+  blast_run = pipeline.run(location=run_path, params={"datafile": payload_file})
+  app.blast_runs[run_id] = blast_run
+  return blast_run
+
+# Endpoint for submitting a BLAST job
+@app.post('/blast/job')
+async def submit_blast(payload: dict, background: BackgroundTasks) -> dict:
+  run_id = secrets.token_urlsafe(16)
+  # Launch the BLAST job pipeline in the background
+  background.add_task(run_blast, run_id, payload)
+  # Return the reference ID for accessing the pipeline instance later
   return {'submission_id': run_id}
 
 # Endpoint for querying a job status
-@app.get("/blast/jobs/status/{job_id}")
-async def blast_job_status(job_id: str) -> dict:
-  #TODO: fetch job status from the nextflow pipeline
-  return {'job_id': job_id, 'status': 'RUNNING'}
+@app.get("/blast/jobs/status/{submission_id}")
+async def blast_job_status(submission_id: str) -> dict:
+  try:
+    execution = app.blast_runs[submission_id]
+  except KeyError:
+    return {'error': f'Submission {submission_id} not found'}
+
+  try:
+    # Get pipeline step 2 (jDispatcher BLAST job polling)
+    status_process = execution.process_executions[1]
+    # Get last job status update
+    job_status = status_process.stdout.split('\n')[-2]
+  except KeyError:
+    job_status = 'WAITING'
+  # Alternative: use the status of the pipeline itself:
+  # Execution.status or Execution.process_executions[N].status
+
+  return {'submission_id': submission_id, 'status': job_status}
 
 # Endpoint for querying multiple job statuses
 @app.post("/blast/jobs/status")
@@ -60,11 +87,23 @@ async def blast_job_statuses(payload: JobIDs) -> dict:
   statuses = [blast_job_status(job_id) for job_id in payload['job_ids']]
   return {'statuses': statuses}
 
-# Proxy for JD BLAST REST API endpoints (/status/:id, /result/:id/:type)
-@app.get("/blast/jobs/result/{job_id}")
-async def blast_result(job_id: str) -> dict:
-  #TODO: fetch final output file from the nextflow pipeline
-  result_file = 'data/blast_payload.json'
+# Endpoint for retrieving the results (processed json)
+@app.get("/blast/jobs/result/{submission_id}")
+async def blast_result(submission_id: str) -> dict:
+  try:
+    execution = app.blast_runs[submission_id]
+  except KeyError:
+    return {'error': f'Submission {submission_id} not found'}
+
+  try:
+    # Get file path from the last line of finished pipeline output
+    result_file = execution.stdout.split('\n')[-2]
+    if not result_file.startswith('/'):
+      raise KeyError
+  except KeyError:
+    return {'error': 'Results file not available'}
+
   with open(result_file) as f:
     results = json.load(f)
+
   return results
